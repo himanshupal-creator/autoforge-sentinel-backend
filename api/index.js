@@ -7,30 +7,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/*
-  ============================================================
-  AUTOForge Sentinel
-  Serverless demo backend
-  No external database required
-  ============================================================
-
-  IMPORTANT:
-  This uses memory storage.
-  Data may reset when the Vercel function restarts.
-*/
-
-// ------------------------------------------------------------
-// In-memory storage
-// ------------------------------------------------------------
+// ============================================================
+// AutoForge Sentinel Backend
+// Vercel-compatible, no external database required
+//
+// IMPORTANT:
+// Data is stored in memory.
+// Data can reset when a serverless instance restarts.
+// ============================================================
 
 const sensors = new Map();
 const events = [];
 const maintenance = [];
 const batches = [];
 
-// ------------------------------------------------------------
+// ============================================================
 // Demo sensor data
-// ------------------------------------------------------------
+// ============================================================
 
 const demoSensors = [
   {
@@ -66,15 +59,15 @@ for (const sensor of demoSensors) {
   sensors.set(sensor.machineId, sensor);
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // Helpers
-// ------------------------------------------------------------
+// ============================================================
 
-function id() {
+function createId() {
   return crypto.randomUUID();
 }
 
-function now() {
+function currentTime() {
   return new Date().toISOString();
 }
 
@@ -102,21 +95,24 @@ function classifySensor(data) {
   return "normal";
 }
 
-// ------------------------------------------------------------
-// Root
-// ------------------------------------------------------------
+// ============================================================
+// Homepage
+// ============================================================
 
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "AutoForge Sentinel Backend",
-    version: "1.0.0",
+    version: "2.0.0",
     status: "running",
-    database: "in-memory",
+    storage: "in-memory",
+    message: "Backend API is running successfully.",
     endpoints: {
       health: "/health",
       dashboard: "/api/dashboard",
       sensors: "/api/sensors",
+      sensorPacket: "POST /api/sensors/packet",
+      sensorLatest: "/api/sensors/latest/:machineId",
       events: "/api/events",
       maintenance: "/api/maintenance",
       batches: "/api/batches"
@@ -124,35 +120,37 @@ app.get("/", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Health
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    database: "in-memory",
+    service: "AutoForge Sentinel Backend",
+    status: "healthy",
+    storage: "in-memory",
     message: "AutoForge Sentinel API is running"
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Dashboard
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/api/dashboard", (req, res) => {
   const sensorList = Array.from(sensors.values());
 
   const normal = sensorList.filter(
-    (s) => s.status === "normal"
+    (sensor) => sensor.status === "normal"
   ).length;
 
   const warning = sensorList.filter(
-    (s) => s.status === "warning"
+    (sensor) => sensor.status === "warning"
   ).length;
 
   const critical = sensorList.filter(
-    (s) => s.status === "critical"
+    (sensor) => sensor.status === "critical"
   ).length;
 
   res.json({
@@ -182,9 +180,9 @@ app.get("/api/dashboard", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Sensors
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/api/sensors", (req, res) => {
   res.json({
@@ -193,7 +191,6 @@ app.get("/api/sensors", (req, res) => {
   });
 });
 
-// Receive sensor packet
 app.post("/api/sensors/packet", (req, res) => {
   const body = req.body || {};
 
@@ -228,18 +225,17 @@ app.post("/api/sensors/packet", (req, res) => {
 
     status: classifySensor(body),
 
-    updatedAt: now()
+    updatedAt: currentTime()
   };
 
   sensors.set(machineId, sensor);
 
-  // Automatically create an event for warning/critical readings
   if (
     sensor.status === "warning" ||
     sensor.status === "critical"
   ) {
     events.push({
-      id: id(),
+      id: createId(),
       machineId,
       type:
         sensor.status === "critical"
@@ -250,7 +246,7 @@ app.post("/api/sensors/packet", (req, res) => {
         sensor.status === "critical"
           ? "Critical sensor condition detected"
           : "Sensor warning detected",
-      createdAt: now()
+      createdAt: currentTime()
     });
   }
 
@@ -260,7 +256,6 @@ app.post("/api/sensors/packet", (req, res) => {
   });
 });
 
-// Get packets / sensor history
 app.get("/api/sensors/packets", (req, res) => {
   res.json({
     ok: true,
@@ -268,7 +263,6 @@ app.get("/api/sensors/packets", (req, res) => {
   });
 });
 
-// Latest sensor for machine
 app.get("/api/sensors/latest/:machineId", (req, res) => {
   const machineId = req.params.machineId;
 
@@ -288,9 +282,9 @@ app.get("/api/sensors/latest/:machineId", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Events
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/api/events", (req, res) => {
   res.json({
@@ -303,13 +297,13 @@ app.post("/api/events", (req, res) => {
   const body = req.body || {};
 
   const event = {
-    id: id(),
+    id: createId(),
     machineId: body.machineId || null,
     type: body.type || "general",
     severity: body.severity || "info",
     message: body.message || "Event created",
     metadata: body.metadata || null,
-    createdAt: now()
+    createdAt: currentTime()
   };
 
   events.push(event);
@@ -320,9 +314,9 @@ app.post("/api/events", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Maintenance
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/api/maintenance", (req, res) => {
   res.json({
@@ -335,14 +329,14 @@ app.post("/api/maintenance", (req, res) => {
   const body = req.body || {};
 
   const record = {
-    id: id(),
+    id: createId(),
     machineId: body.machineId || null,
     title: body.title || "Maintenance task",
     description: body.description || "",
     status: body.status || "scheduled",
     scheduledAt: body.scheduledAt || null,
     technician: body.technician || null,
-    createdAt: now()
+    createdAt: currentTime()
   };
 
   maintenance.push(record);
@@ -369,7 +363,7 @@ app.patch("/api/maintenance/:id", (req, res) => {
     ...maintenance[index],
     ...req.body,
     id: maintenance[index].id,
-    updatedAt: now()
+    updatedAt: currentTime()
   };
 
   res.json({
@@ -378,9 +372,9 @@ app.patch("/api/maintenance/:id", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // Batches
-// ------------------------------------------------------------
+// ============================================================
 
 app.get("/api/batches", (req, res) => {
   res.json({
@@ -393,7 +387,7 @@ app.post("/api/batches", (req, res) => {
   const body = req.body || {};
 
   const batch = {
-    id: id(),
+    id: createId(),
     batchNumber:
       body.batchNumber ||
       `BATCH-${Date.now()}`,
@@ -404,7 +398,7 @@ app.post("/api/batches", (req, res) => {
         ? Number(body.quantity)
         : 0,
     status: body.status || "processing",
-    createdAt: now()
+    createdAt: currentTime()
   };
 
   batches.push(batch);
@@ -415,9 +409,9 @@ app.post("/api/batches", (req, res) => {
   });
 });
 
-// ------------------------------------------------------------
-// 404 handler
-// ------------------------------------------------------------
+// ============================================================
+// 404
+// ============================================================
 
 app.use((req, res) => {
   res.status(404).json({
@@ -426,8 +420,8 @@ app.use((req, res) => {
   });
 });
 
-// ------------------------------------------------------------
-// Export for Vercel
-// ------------------------------------------------------------
+// ============================================================
+// Vercel export
+// ============================================================
 
 module.exports = app;
