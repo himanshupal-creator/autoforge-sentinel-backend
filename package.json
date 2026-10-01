@@ -3,12 +3,18 @@
   "version": "2.0.0",
   "private": true,
   "main": "api/index.js",
-  "scripts": {"dev": "vercel dev", "start": "vercel dev"},
-  "engines": {"node": "24.x"},
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "engines": {
+    "node": "24.x"
+  },
   "dependencies": {
-    "@neondatabase/serverless": "^1.0.2",
     "cors": "^2.8.5",
     "express": "^5.1.0"
   },
-  "devDependencies": {"vercel": "^48.0.0"}
+  "devDependencies": {
+    "vercel": "^48.0.0"
+  }
 }
