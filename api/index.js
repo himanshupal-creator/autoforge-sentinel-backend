@@ -1,155 +1,433 @@
 const express = require("express");
 const cors = require("cors");
-const { neon } = require("@neondatabase/serverless");
+const crypto = require("crypto");
 
 const app = express();
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
+
+app.use(cors());
 app.use(express.json());
 
-function sqlClient() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL environment variable is not configured");
-  return neon(process.env.DATABASE_URL);
+/*
+  ============================================================
+  AUTOForge Sentinel
+  Serverless demo backend
+  No external database required
+  ============================================================
+
+  IMPORTANT:
+  This uses memory storage.
+  Data may reset when the Vercel function restarts.
+*/
+
+// ------------------------------------------------------------
+// In-memory storage
+// ------------------------------------------------------------
+
+const sensors = new Map();
+const events = [];
+const maintenance = [];
+const batches = [];
+
+// ------------------------------------------------------------
+// Demo sensor data
+// ------------------------------------------------------------
+
+const demoSensors = [
+  {
+    machineId: "MACHINE-001",
+    sensorId: "TEMP-001",
+    temperature: 72.4,
+    vibration: 2.1,
+    pressure: 101.2,
+    status: "normal",
+    updatedAt: new Date().toISOString()
+  },
+  {
+    machineId: "MACHINE-002",
+    sensorId: "TEMP-002",
+    temperature: 84.7,
+    vibration: 4.8,
+    pressure: 108.6,
+    status: "warning",
+    updatedAt: new Date().toISOString()
+  },
+  {
+    machineId: "MACHINE-003",
+    sensorId: "TEMP-003",
+    temperature: 96.3,
+    vibration: 7.4,
+    pressure: 115.1,
+    status: "critical",
+    updatedAt: new Date().toISOString()
+  }
+];
+
+for (const sensor of demoSensors) {
+  sensors.set(sensor.machineId, sensor);
 }
 
-async function initDb(sql) {
-  await sql`CREATE TABLE IF NOT EXISTS sensor_packets (
-    id BIGSERIAL PRIMARY KEY, machine_id TEXT NOT NULL, timestamp TIMESTAMPTZ NOT NULL,
-    rpm DOUBLE PRECISION NOT NULL, vibration DOUBLE PRECISION NOT NULL,
-    temperature DOUBLE PRECISION NOT NULL, current DOUBLE PRECISION NOT NULL,
-    status TEXT NOT NULL, risk DOUBLE PRECISION NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
-  await sql`CREATE TABLE IF NOT EXISTS events (
-    id BIGSERIAL PRIMARY KEY, machine_id TEXT NOT NULL, type TEXT NOT NULL,
-    severity TEXT NOT NULL, message TEXT NOT NULL, timestamp TIMESTAMPTZ NOT NULL)`;
-  await sql`CREATE TABLE IF NOT EXISTS maintenance (
-    id BIGSERIAL PRIMARY KEY, machine_id TEXT NOT NULL, action TEXT NOT NULL,
-    priority TEXT NOT NULL, status TEXT NOT NULL, due_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
-  await sql`CREATE TABLE IF NOT EXISTS batches (
-    id BIGSERIAL PRIMARY KEY, batch_id TEXT UNIQUE NOT NULL, machine_id TEXT NOT NULL,
-    quantity INTEGER NOT NULL, good INTEGER NOT NULL DEFAULT 0, reject INTEGER NOT NULL DEFAULT 0,
-    started_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)`;
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
+
+function id() {
+  return crypto.randomUUID();
 }
 
-function classifySensor({rpm, vibration, temperature, current}) {
-  let score = 0;
-  if (vibration > 7) score += 2; else if (vibration > 4) score += 1;
-  if (temperature > 85) score += 2; else if (temperature > 70) score += 1;
-  if (current > 18) score += 2; else if (current > 14) score += 1;
-  if (rpm < 900 || rpm > 1800) score += 1;
-  const status = score >= 4 ? "Reject" : score >= 2 ? "Warning" : "Good";
-  const risk = Math.min(99, Math.round(score * 18 + vibration * 3 + Math.max(0, temperature - 60) * 0.5));
-  return {status, risk};
+function now() {
+  return new Date().toISOString();
 }
 
-app.get("/health", async (req,res) => {
-  try { const sql=sqlClient(); await sql`SELECT 1`;
-    res.json({ok:true,database:"connected",service:"autoforge-sentinel-backend",time:new Date().toISOString()});
-  } catch(e) { res.status(503).json({ok:false,database:"unavailable",error:e.message}); }
+function classifySensor(data) {
+  const temperature = Number(data.temperature || 0);
+  const vibration = Number(data.vibration || 0);
+  const pressure = Number(data.pressure || 0);
+
+  if (
+    temperature >= 95 ||
+    vibration >= 7 ||
+    pressure >= 120
+  ) {
+    return "critical";
+  }
+
+  if (
+    temperature >= 80 ||
+    vibration >= 4 ||
+    pressure >= 110
+  ) {
+    return "warning";
+  }
+
+  return "normal";
+}
+
+// ------------------------------------------------------------
+// Root
+// ------------------------------------------------------------
+
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "AutoForge Sentinel Backend",
+    version: "1.0.0",
+    status: "running",
+    database: "in-memory",
+    endpoints: {
+      health: "/health",
+      dashboard: "/api/dashboard",
+      sensors: "/api/sensors",
+      events: "/api/events",
+      maintenance: "/api/maintenance",
+      batches: "/api/batches"
+    }
+  });
 });
 
-app.get("/api/dashboard", async (req,res) => {
-  try {
-    const sql=sqlClient(); await initDb(sql);
-    const latest=await sql`SELECT * FROM sensor_packets ORDER BY id DESC LIMIT 1`;
-    const statusCounts=await sql`SELECT status, COUNT(*)::int AS count FROM sensor_packets GROUP BY status ORDER BY status`;
-    const maintenance=await sql`SELECT COUNT(*)::int AS count FROM maintenance WHERE status IN ('Open','In Progress')`;
-    const totals=await sql`SELECT (SELECT COUNT(*)::int FROM sensor_packets) AS packets,
-      (SELECT COUNT(*)::int FROM events) AS events, (SELECT COUNT(*)::int FROM batches) AS batches`;
-    res.json({latest:latest[0]||null,statusCounts,maintenance:{open:maintenance[0].count},totals:totals[0]});
-  } catch(e){res.status(500).json({error:e.message});}
+// ------------------------------------------------------------
+// Health
+// ------------------------------------------------------------
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    database: "in-memory",
+    message: "AutoForge Sentinel API is running"
+  });
 });
 
-app.post("/api/sensors/packet", async (req,res) => {
-  try {
-    const {machineId="M-001",rpm,vibration,temperature,current}=req.body;
-    if([rpm,vibration,temperature,current].some(v=>typeof v!=="number"||!Number.isFinite(v)))
-      return res.status(400).json({error:"rpm, vibration, temperature and current must be numbers"});
-    const sql=sqlClient(); await initDb(sql);
-    const {status,risk}=classifySensor({rpm,vibration,temperature,current});
-    const timestamp=new Date().toISOString();
-    const rows=await sql`INSERT INTO sensor_packets
-      (machine_id,timestamp,rpm,vibration,temperature,current,status,risk)
-      VALUES (${machineId},${timestamp},${rpm},${vibration},${temperature},${current},${status},${risk}) RETURNING *`;
-    if(status!=="Good") await sql`INSERT INTO events
-      (machine_id,type,severity,message,timestamp)
-      VALUES (${machineId},'sensor_alert',${status},${"Sensor fusion classified packet as "+status},${timestamp})`;
-    res.status(201).json(rows[0]);
-  } catch(e){res.status(500).json({error:e.message});}
+// ------------------------------------------------------------
+// Dashboard
+// ------------------------------------------------------------
+
+app.get("/api/dashboard", (req, res) => {
+  const sensorList = Array.from(sensors.values());
+
+  const normal = sensorList.filter(
+    (s) => s.status === "normal"
+  ).length;
+
+  const warning = sensorList.filter(
+    (s) => s.status === "warning"
+  ).length;
+
+  const critical = sensorList.filter(
+    (s) => s.status === "critical"
+  ).length;
+
+  res.json({
+    ok: true,
+
+    summary: {
+      totalMachines: sensorList.length,
+      normal,
+      warning,
+      critical,
+      totalEvents: events.length,
+      totalMaintenance: maintenance.length,
+      totalBatches: batches.length
+    },
+
+    sensors: sensorList,
+
+    recentEvents: events.slice(-10).reverse(),
+
+    recentMaintenance: maintenance
+      .slice(-10)
+      .reverse(),
+
+    recentBatches: batches
+      .slice(-10)
+      .reverse()
+  });
 });
 
-app.get("/api/sensors/packets", async (req,res) => {
-  try { const sql=sqlClient(); await initDb(sql);
-    const limit=Math.min(Math.max(Number(req.query.limit||100),1),1000);
-    res.json(await sql`SELECT * FROM sensor_packets ORDER BY id DESC LIMIT ${limit}`);
-  } catch(e){res.status(500).json({error:e.message});}
+// ------------------------------------------------------------
+// Sensors
+// ------------------------------------------------------------
+
+app.get("/api/sensors", (req, res) => {
+  res.json({
+    ok: true,
+    sensors: Array.from(sensors.values())
+  });
 });
 
-app.get("/api/sensors/latest/:machineId", async (req,res) => {
-  try { const sql=sqlClient(); await initDb(sql);
-    const rows=await sql`SELECT * FROM sensor_packets WHERE machine_id=${req.params.machineId} ORDER BY id DESC LIMIT 1`;
-    if(!rows[0]) return res.status(404).json({error:"No sensor data found"});
-    res.json(rows[0]);
-  } catch(e){res.status(500).json({error:e.message});}
+// Receive sensor packet
+app.post("/api/sensors/packet", (req, res) => {
+  const body = req.body || {};
+
+  const machineId =
+    body.machineId ||
+    body.machine_id ||
+    "UNKNOWN-MACHINE";
+
+  const sensorId =
+    body.sensorId ||
+    body.sensor_id ||
+    `SENSOR-${machineId}`;
+
+  const sensor = {
+    machineId,
+    sensorId,
+
+    temperature:
+      body.temperature !== undefined
+        ? Number(body.temperature)
+        : null,
+
+    vibration:
+      body.vibration !== undefined
+        ? Number(body.vibration)
+        : null,
+
+    pressure:
+      body.pressure !== undefined
+        ? Number(body.pressure)
+        : null,
+
+    status: classifySensor(body),
+
+    updatedAt: now()
+  };
+
+  sensors.set(machineId, sensor);
+
+  // Automatically create an event for warning/critical readings
+  if (
+    sensor.status === "warning" ||
+    sensor.status === "critical"
+  ) {
+    events.push({
+      id: id(),
+      machineId,
+      type:
+        sensor.status === "critical"
+          ? "critical_sensor"
+          : "sensor_warning",
+      severity: sensor.status,
+      message:
+        sensor.status === "critical"
+          ? "Critical sensor condition detected"
+          : "Sensor warning detected",
+      createdAt: now()
+    });
+  }
+
+  res.status(201).json({
+    ok: true,
+    sensor
+  });
 });
 
-app.get("/api/events", async (req,res) => {
-  try { const sql=sqlClient(); await initDb(sql);
-    const limit=Math.min(Math.max(Number(req.query.limit||100),1),1000);
-    res.json(await sql`SELECT * FROM events ORDER BY id DESC LIMIT ${limit}`);
-  } catch(e){res.status(500).json({error:e.message});}
+// Get packets / sensor history
+app.get("/api/sensors/packets", (req, res) => {
+  res.json({
+    ok: true,
+    packets: Array.from(sensors.values())
+  });
 });
 
-app.post("/api/events", async (req,res) => {
-  try { const {machineId="M-001",type="manual",severity="Info",message}=req.body;
-    if(!message) return res.status(400).json({error:"message is required"});
-    const sql=sqlClient(); await initDb(sql); const timestamp=new Date().toISOString();
-    const rows=await sql`INSERT INTO events (machine_id,type,severity,message,timestamp)
-      VALUES (${machineId},${type},${severity},${message},${timestamp}) RETURNING *`;
-    res.status(201).json(rows[0]);
-  } catch(e){res.status(500).json({error:e.message});}
+// Latest sensor for machine
+app.get("/api/sensors/latest/:machineId", (req, res) => {
+  const machineId = req.params.machineId;
+
+  const sensor = sensors.get(machineId);
+
+  if (!sensor) {
+    return res.status(404).json({
+      ok: false,
+      error: "Machine not found",
+      machineId
+    });
+  }
+
+  res.json({
+    ok: true,
+    sensor
+  });
 });
 
-app.get("/api/maintenance", async (req,res) => {
-  try { const sql=sqlClient(); await initDb(sql); res.json(await sql`SELECT * FROM maintenance ORDER BY id DESC`); }
-  catch(e){res.status(500).json({error:e.message});}
+// ------------------------------------------------------------
+// Events
+// ------------------------------------------------------------
+
+app.get("/api/events", (req, res) => {
+  res.json({
+    ok: true,
+    events: [...events].reverse()
+  });
 });
 
-app.post("/api/maintenance", async (req,res) => {
-  try { const {machineId="M-001",action,priority="Medium",dueAt=null}=req.body;
-    if(!action) return res.status(400).json({error:"action is required"});
-    const sql=sqlClient(); await initDb(sql);
-    const rows=await sql`INSERT INTO maintenance (machine_id,action,priority,status,due_at)
-      VALUES (${machineId},${action},${priority},'Open',${dueAt}) RETURNING *`;
-    res.status(201).json(rows[0]);
-  } catch(e){res.status(500).json({error:e.message});}
+app.post("/api/events", (req, res) => {
+  const body = req.body || {};
+
+  const event = {
+    id: id(),
+    machineId: body.machineId || null,
+    type: body.type || "general",
+    severity: body.severity || "info",
+    message: body.message || "Event created",
+    metadata: body.metadata || null,
+    createdAt: now()
+  };
+
+  events.push(event);
+
+  res.status(201).json({
+    ok: true,
+    event
+  });
 });
 
-app.patch("/api/maintenance/:id", async (req,res) => {
-  try { const allowed=["Open","In Progress","Completed","Cancelled"],{status}=req.body;
-    if(!allowed.includes(status)) return res.status(400).json({error:"Invalid maintenance status"});
-    const sql=sqlClient(); await initDb(sql);
-    const rows=await sql`UPDATE maintenance SET status=${status} WHERE id=${req.params.id} RETURNING *`;
-    if(!rows[0]) return res.status(404).json({error:"Maintenance record not found"});
-    res.json(rows[0]);
-  } catch(e){res.status(500).json({error:e.message});}
+// ------------------------------------------------------------
+// Maintenance
+// ------------------------------------------------------------
+
+app.get("/api/maintenance", (req, res) => {
+  res.json({
+    ok: true,
+    maintenance: [...maintenance].reverse()
+  });
 });
 
-app.get("/api/batches", async (req,res) => {
-  try { const sql=sqlClient(); await initDb(sql); res.json(await sql`SELECT * FROM batches ORDER BY id DESC`); }
-  catch(e){res.status(500).json({error:e.message});}
+app.post("/api/maintenance", (req, res) => {
+  const body = req.body || {};
+
+  const record = {
+    id: id(),
+    machineId: body.machineId || null,
+    title: body.title || "Maintenance task",
+    description: body.description || "",
+    status: body.status || "scheduled",
+    scheduledAt: body.scheduledAt || null,
+    technician: body.technician || null,
+    createdAt: now()
+  };
+
+  maintenance.push(record);
+
+  res.status(201).json({
+    ok: true,
+    maintenance: record
+  });
 });
 
-app.post("/api/batches", async (req,res) => {
-  try { const {batchId,machineId="M-001",quantity,good=0,reject=0}=req.body;
-    if(!batchId||!Number.isInteger(quantity)) return res.status(400).json({error:"batchId and integer quantity are required"});
-    const sql=sqlClient(); await initDb(sql);
-    const rows=await sql`INSERT INTO batches (batch_id,machine_id,quantity,good,reject,started_at)
-      VALUES (${batchId},${machineId},${quantity},${good},${reject},NOW()) RETURNING *`;
-    res.status(201).json(rows[0]);
-  } catch(e){ if(e.code==="23505") return res.status(409).json({error:"batchId already exists"});
-    res.status(500).json({error:e.message});}
+app.patch("/api/maintenance/:id", (req, res) => {
+  const index = maintenance.findIndex(
+    (item) => item.id === req.params.id
+  );
+
+  if (index === -1) {
+    return res.status(404).json({
+      ok: false,
+      error: "Maintenance record not found"
+    });
+  }
+
+  maintenance[index] = {
+    ...maintenance[index],
+    ...req.body,
+    id: maintenance[index].id,
+    updatedAt: now()
+  };
+
+  res.json({
+    ok: true,
+    maintenance: maintenance[index]
+  });
 });
 
-app.use((req,res)=>res.status(404).json({error:"Route not found",path:req.originalUrl}));
-module.exports=app;
+// ------------------------------------------------------------
+// Batches
+// ------------------------------------------------------------
+
+app.get("/api/batches", (req, res) => {
+  res.json({
+    ok: true,
+    batches: [...batches].reverse()
+  });
+});
+
+app.post("/api/batches", (req, res) => {
+  const body = req.body || {};
+
+  const batch = {
+    id: id(),
+    batchNumber:
+      body.batchNumber ||
+      `BATCH-${Date.now()}`,
+    machineId: body.machineId || null,
+    product: body.product || null,
+    quantity:
+      body.quantity !== undefined
+        ? Number(body.quantity)
+        : 0,
+    status: body.status || "processing",
+    createdAt: now()
+  };
+
+  batches.push(batch);
+
+  res.status(201).json({
+    ok: true,
+    batch
+  });
+});
+
+// ------------------------------------------------------------
+// 404 handler
+// ------------------------------------------------------------
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Route not found",
+    path: req.path
+  });
+});
+
+// ------------------------------------------------------------
+// Export for Vercel
+// ------------------------------------------------------------
+
+module.exports = app;
