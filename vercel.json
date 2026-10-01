@@ -1,6 +1,3 @@
 {
-  "version": 2,
-  "functions": {
-    "api/index.js": {"runtime": "nodejs24.x"}
-  }
+  "$schema": "https://openapi.vercel.sh/vercel.json"
 }
